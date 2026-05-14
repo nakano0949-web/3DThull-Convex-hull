@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>3D THull Unified Viewer (Fixed)</title>
+
+  <!-- Three.js + ConvexHull + ConvexGeometry（順番が超重要） -->
+  <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.128.0/examples/js/math/ConvexHull.js"></script>
+  <script src="https://unpkg.com/three@0.128.0/examples/js/geometries/ConvexGeometry.js"></script>
+
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+    #ui {
+      position: absolute; top: 10px; left: 10px;
+      background: rgba(0,0,0,0.6); padding: 10px; border-radius: 5px; color: #fff;
+    }
+    #tabs button {
+      margin-right: 5px; padding: 5px 10px; cursor: pointer;
+    }
+    #stats { margin-top: 10px; font-size: 13px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div id="tabs">
+      <button onclick="switchMode('points')">Points Mode</button>
+      <button onclick="switchMode('mesh')">Convex Mesh Mode</button>
+      <button onclick="recalc()">Recalculate</button>
+    </div>
+    <div id="stats">Initializing...</div>
+  </div>
+
+  <script>
+    // ------------------------------
+    // 1. THull 3D Core
+    // ------------------------------
+    function getDist(p, a, b, c) {
+      const v1 = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+      const v2 = { x: c.x - a.x, y: c.y - a.y, z: c.z - a.z };
+      const n = {
+        x: v1.y * v2.z - v1.z * v2.y,
+        y: v1.z * v2.x - v1.x * v2.z,
+        z: v1.x * v2.y - v1.y * v2.x
+      };
+      const nLen = Math.sqrt(n.x*n.x + n.y*n.y + n.z*n.z);
+      return nLen === 0 ? 0 :
+        Math.abs((p.x-a.x)*n.x + (p.y-a.y)*n.y + (p.z-a.z)*n.z) / nLen;
+    }
+
+    function thull3d(points) {
+      // 閾値少し下げて、filtered が少なすぎて mesh 不能になるのを防ぐ
+      if (points.length < 300) return points;
+
+      let sx=0, sy=0, sz=0;
+      for (let p of points) { sx+=p.x; sy+=p.y; sz+=p.z; }
+      const cx=sx/points.length, cy=sy/points.length, cz=sz/points.length;
+
+      const sectors = Array.from({length:8},()=>[]);
+      const extrema = Array.from({length:8},()=>null);
+
+      for (let p of points) {
+        let idx = (p.x>cx?1:0)|(p.y>cy?2:0)|(p.z>cz?4:0);
+        sectors[idx].push(p);
+        let d=(p.x-cx)**2+(p.y-cy)**2+(p.z-cz)**2;
+        if (!extrema[idx] || d > extrema[idx].d) extrema[idx] = {p, d};
+      }
+
+      let filtered=[];
+      for (let i=0;i<8;i++) {
+        if (!extrema[i] || sectors[i].length < 10) {
+          if (extrema[i]) filtered.push(...sectors[i]);
+          continue;
+        }
+        const p1 = extrema[i].p;
+        const p2 = {x:p1.x, y:cy, z:cz};
+        const p3 = {x:cx, y:p1.y, z:cz};
+        const H = getDist({x:cx,y:cy,z:cz}, p1, p2, p3);
+
+        // 0.55 → 0.45 に緩和して、点数が減りすぎないように
+        const nextA = sectors[i].filter(
+          p => getDist(p, p1, p2, p3) >= H * 0.45
+        );
+        filtered.push(...thull3d(nextA));
+      }
+      return filtered;
+    }
+
+    // ------------------------------
+    // 2. Three.js Setup
+    // ------------------------------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(
+      75, window.innerWidth/window.innerHeight, 0.1, 1000
+    );
+    camera.position.z = 14;
+
+    const renderer = new THREE.WebGLRenderer({antialias:true});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // ライト（mesh モード用）
+    const amb = new THREE.AmbientLight(0x444444);
+    scene.add(amb);
+    const dir1 = new THREE.DirectionalLight(0x00ff88, 0.8);
+    dir1.position.set(10,10,10);
+    scene.add(dir1);
+    const dir2 = new THREE.DirectionalLight(0x0088ff, 0.6);
+    dir2.position.set(-10,-10,-10);
+    scene.add(dir2);
+
+    let mode = "points"; // "points" or "mesh"
+    let pointsObj = null;
+    let boxHelper = null;
+    let mesh = null;
+    let wire = null;
+
+    // ------------------------------
+    // 3. Generate + Draw
+    // ------------------------------
+    function generatePoints() {
+      const N = 100000;
+      const pts = [];
+      for (let i=0;i<N;i++) {
+        pts.push({
+          x:(Math.random()-0.5)*10,
+          y:(Math.random()-0.5)*10,
+          z:(Math.random()-0.5)*10
+        });
+      }
+
+      const t0 = performance.now();
+      const filtered = thull3d(pts);
+      const t1 = performance.now();
+
+      const statsDiv = document.getElementById("stats");
+      statsDiv.innerHTML =
+        `Original: ${N.toLocaleString()} pts<br>` +
+        `Filtered: ${filtered.length.toLocaleString()} pts<br>` +
+        `Time: ${(t1-t0).toFixed(2)} ms`;
+
+      return filtered;
+    }
+
+    function clearScene() {
+      if (pointsObj) { scene.remove(pointsObj); pointsObj = null; }
+      if (boxHelper) { scene.remove(boxHelper); boxHelper = null; }
+      if (mesh) { scene.remove(mesh); mesh = null; }
+      if (wire) { scene.remove(wire); wire = null; }
+    }
+
+    function drawPoints(filtered) {
+      clearScene();
+
+      const geom = new THREE.BufferGeometry().setFromPoints(
+        filtered.map(p => new THREE.Vector3(p.x,p.y,p.z))
+      );
+      const mat = new THREE.PointsMaterial({color:0x00ff00, size:0.05});
+      pointsObj = new THREE.Points(geom, mat);
+      scene.add(pointsObj);
+
+      boxHelper = new THREE.BoxHelper(pointsObj, 0xffff00);
+      scene.add(boxHelper);
+    }
+
+    function drawMesh(filtered) {
+      clearScene();
+
+      // ConvexGeometry は 4 点未満だと作れないのでガード
+      if (filtered.length < 4) {
+        drawPoints(filtered);
+        const statsDiv = document.getElementById("stats");
+        statsDiv.innerHTML += `<br><span style="color:#f88">Filtered points &lt; 4, fallback to points mode.</span>`;
+        return;
+      }
+
+      const pts = filtered.map(p => new THREE.Vector3(p.x,p.y,p.z));
+      const geom = new THREE.ConvexGeometry(pts);
+
+      mesh = new THREE.Mesh(
+        geom,
+        new THREE.MeshPhongMaterial({
+          color:0x00ff88,
+          transparent:true,
+          opacity:0.6,
+          side:THREE.DoubleSide,
+          shininess:100
+        })
+      );
+      scene.add(mesh);
+
+      wire = new THREE.Mesh(
+        geom,
+        new THREE.MeshBasicMaterial({
+          color:0xffffff,
+          wireframe:true,
+          transparent:true,
+          opacity:0.25
+        })
+      );
+      scene.add(wire);
+    }
+
+    // ------------------------------
+    // 4. UI Actions
+    // ------------------------------
+    function switchMode(m) {
+      mode = m;
+      recalc();
+    }
+
+    function recalc() {
+      const filtered = generatePoints();
+      if (mode === "points") drawPoints(filtered);
+      else drawMesh(filtered);
+    }
+
+    // ------------------------------
+    // 5. Animation Loop
+    // ------------------------------
+    function animate() {
+      requestAnimationFrame(animate);
+
+      if (pointsObj) {
+        pointsObj.rotation.y += 0.01;
+        if (boxHelper) boxHelper.rotation.y += 0.01;
+      }
+      if (mesh) {
+        mesh.rotation.y += 0.005;
+        mesh.rotation.x += 0.003;
+      }
+      if (wire) {
+        wire.rotation.y += 0.005;
+        wire.rotation.x += 0.003;
+      }
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // リサイズ対応
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // 初回実行
+    recalc();
+  </script>
+</body>
+</html>
